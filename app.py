@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 from typing import List
 import pandas as pd
@@ -96,10 +96,10 @@ def post_data(entries: List[DataEntry]):
 
     return {"message": "Data added and models updated successfully."}
 
-# Predict for 3 months
-def predict_for_three_months(product_id):
+# Predict for 15-day intervals
+def predict_for_15_day_intervals(product_id, days):
     predictions = []
-    forecast_dates = pd.date_range(start=datetime.now().date(), periods=90)
+    forecast_dates = pd.date_range(start=datetime.now().date(), periods=days, freq='15D')  # 15-day intervals
 
     product_data = data[data['product_id'] == product_id]
     if product_data.empty:
@@ -113,41 +113,111 @@ def predict_for_three_months(product_id):
         sarima_path = os.path.join(MODEL_DIR, f"{product_id}_sarima.pkl")
         if os.path.exists(sarima_path):
             sarima_model = joblib.load(sarima_path)
-            predictions_dict["sarima"] = sarima_model.get_forecast(steps=90).predicted_mean
+            sarima_forecast = sarima_model.get_forecast(steps=days).predicted_mean
+            # We sum the forecast for each block of 15 days to get the total quantity for each interval
+            predictions_dict["sarima"] = [np.sum(sarima_forecast[i:i+15]) for i in range(0, len(sarima_forecast), 15)]
 
         # Random Forest Model Prediction
         rf_path = os.path.join(MODEL_DIR, f"{product_id}_rf.pkl")
         if os.path.exists(rf_path):
             rf_model = joblib.load(rf_path)
-            X_future = np.arange(len(product_data), len(product_data) + 90).reshape(-1, 1)
-            predictions_dict["rf"] = rf_model.predict(X_future)
+            X_future = np.arange(len(product_data), len(product_data) + days).reshape(-1, 1)
+            rf_forecast = rf_model.predict(X_future)
+            # Similarly, we sum the forecast for each 15-day block
+            predictions_dict["rf"] = [np.sum(rf_forecast[i:i+15]) for i in range(0, len(rf_forecast), 15)]
 
+        # Combine forecasts
         forecasts = [predictions_dict[key] for key in predictions_dict if len(predictions_dict[key]) > 0]
         final_forecast = np.mean(forecasts, axis=0) if len(forecasts) > 0 else np.array([])
 
         for i, quantity in enumerate(final_forecast):
             predictions.append({
-                "date": forecast_dates[i].date(),
-                "product_id": product_id,
-                "predicted_quantity": round(quantity, 2)
+                "order_date": forecast_dates[i].date(),
+                "item_name": product_data.iloc[0]["item_name"],  # Assuming item_name is the same for the product
+                "department": product_data.iloc[0]["department"],  # Assuming department is the same for the product
+                "quantity": round(quantity, 2)
             })
     except Exception as e:
         logging.error(f"Error in prediction for product {product_id}: {e}")
 
     return predictions
 
-# GET endpoint to make predictions for the next three months
-@app.get("/predict-three-months/")
-def predict_three_months():
+# Predict for 1-day intervals (daily)
+def predict_for_daily_intervals(product_id):
+    predictions = []
+    forecast_dates = pd.date_range(start=datetime.now().date(), periods=1, freq='D')  # 1-day interval
+
+    product_data = data[data['product_id'] == product_id]
+    if product_data.empty:
+        logging.warning(f"No data available for product {product_id}.")
+        return []
+
+    predictions_dict = {"sarima": [], "rf": []}
+
+    try:
+        # SARIMA Model Prediction
+        sarima_path = os.path.join(MODEL_DIR, f"{product_id}_sarima.pkl")
+        if os.path.exists(sarima_path):
+            sarima_model = joblib.load(sarima_path)
+            sarima_forecast = sarima_model.get_forecast(steps=1).predicted_mean
+            predictions_dict["sarima"] = [sarima_forecast[0]]
+
+        # Random Forest Model Prediction
+        rf_path = os.path.join(MODEL_DIR, f"{product_id}_rf.pkl")
+        if os.path.exists(rf_path):
+            rf_model = joblib.load(rf_path)
+            X_future = np.arange(len(product_data), len(product_data) + 1).reshape(-1, 1)
+            rf_forecast = rf_model.predict(X_future)
+            predictions_dict["rf"] = [rf_forecast[0]]
+
+        # Combine forecasts
+        forecasts = [predictions_dict[key] for key in predictions_dict if len(predictions_dict[key]) > 0]
+        final_forecast = np.mean(forecasts, axis=0) if len(forecasts) > 0 else np.array([])
+
+        for i, quantity in enumerate(final_forecast):
+            predictions.append({
+                "order_date": forecast_dates[i].date(),
+                "item_name": product_data.iloc[0]["item_name"],  # Assuming item_name is the same for the product
+                "department": product_data.iloc[0]["department"],  # Assuming department is the same for the product
+                "quantity": round(quantity, 2)
+            })
+    except Exception as e:
+        logging.error(f"Error in prediction for product {product_id}: {e}")
+
+    return predictions
+
+# GET endpoint to make predictions for a specific number of days (in 15-day intervals)
+@app.get("/predict/")
+def predict_for_days_endpoint(days: int = Query(..., ge=1, le=365)):
+    # Ensure the days is a multiple of 15, because we are predicting in blocks of 15 days
+    if days % 15 != 0:
+        raise HTTPException(status_code=400, detail="The number of days must be a multiple of 15.")
+
     product_ids = data['product_id'].unique()
     all_predictions = []
 
     for product_id in product_ids:
-        product_predictions = predict_for_three_months(product_id)
+        product_predictions = predict_for_15_day_intervals(product_id, days)
         all_predictions.extend(product_predictions)
 
     if not all_predictions:
         raise HTTPException(status_code=400, detail="No predictions could be generated.")
 
     pd.DataFrame(all_predictions).to_csv("inventory_predictions.csv", index=False)
+    return all_predictions
+
+# GET endpoint to make daily predictions
+@app.get("/predict-daily/")
+def predict_daily_endpoint():
+    product_ids = data['product_id'].unique()
+    all_predictions = []
+
+    for product_id in product_ids:
+        product_predictions = predict_for_daily_intervals(product_id)
+        all_predictions.extend(product_predictions)
+
+    if not all_predictions:
+        raise HTTPException(status_code=400, detail="No daily predictions could be generated.")
+
+    pd.DataFrame(all_predictions).to_csv("daily_inventory_predictions.csv", index=False)
     return all_predictions
