@@ -179,8 +179,3 @@ def predict_three_months():
 
     pd.DataFrame(all_predictions).to_csv("inventory_predictions.csv", index=False)
     return all_predictions
-
-# Run app
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
