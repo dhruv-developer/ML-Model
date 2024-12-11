@@ -9,7 +9,6 @@ import numpy as np
 from datetime import datetime, timedelta
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from sklearn.ensemble import RandomForestRegressor
-from prophet import Prophet
 
 # Initialize FastAPI app and logger
 app = FastAPI()
@@ -56,17 +55,6 @@ def train_random_forest(X, y):
         logging.error(f"Error training Random Forest: {e}")
         return None
 
-# Train Prophet model
-def train_prophet(product_data):
-    try:
-        df = product_data.rename(columns={"date": "ds", "quantity": "y"})
-        model = Prophet()
-        model.fit(df)
-        return model
-    except Exception as e:
-        logging.error(f"Error training Prophet: {e}")
-        return None
-
 # Train models for a specific product
 def train_models_for_product(product_id):
     product_data = data[data['product_id'] == product_id].sort_values(by="date")
@@ -90,13 +78,6 @@ def train_models_for_product(product_id):
         rf_path = os.path.join(MODEL_DIR, f"{product_id}_rf.pkl")
         joblib.dump(rf_model, rf_path)
         logging.info(f"Trained and saved Random Forest model for product {product_id}.")
-
-    # Train Prophet
-    prophet_model = train_prophet(product_data)
-    if prophet_model:
-        prophet_path = os.path.join(MODEL_DIR, f"{product_id}_prophet.pkl")
-        joblib.dump(prophet_model, prophet_path)
-        logging.info(f"Trained and saved Prophet model for product {product_id}.")
 
 # POST endpoint to accept real-time data
 @app.post("/post-data/")
@@ -125,7 +106,7 @@ def predict_for_three_months(product_id):
         logging.warning(f"No data available for product {product_id}.")
         return []
 
-    predictions_dict = {"sarima": [], "rf": [], "prophet": []}
+    predictions_dict = {"sarima": [], "rf": []}
 
     try:
         # SARIMA Model Prediction
@@ -141,14 +122,6 @@ def predict_for_three_months(product_id):
             X_future = np.arange(len(product_data), len(product_data) + 90).reshape(-1, 1)
             predictions_dict["rf"] = rf_model.predict(X_future)
 
-        # Prophet Model Prediction
-        prophet_path = os.path.join(MODEL_DIR, f"{product_id}_prophet.pkl")
-        if os.path.exists(prophet_path):
-            prophet_model = joblib.load(prophet_path)
-            future = pd.DataFrame({'ds': forecast_dates})
-            prophet_forecast = prophet_model.predict(future)
-            predictions_dict["prophet"] = prophet_forecast['yhat'].to_numpy()
-
         forecasts = [predictions_dict[key] for key in predictions_dict if len(predictions_dict[key]) > 0]
         final_forecast = np.mean(forecasts, axis=0) if len(forecasts) > 0 else np.array([])
 
@@ -162,7 +135,6 @@ def predict_for_three_months(product_id):
         logging.error(f"Error in prediction for product {product_id}: {e}")
 
     return predictions
-
 
 # GET endpoint to make predictions for the next three months
 @app.get("/predict-three-months/")
